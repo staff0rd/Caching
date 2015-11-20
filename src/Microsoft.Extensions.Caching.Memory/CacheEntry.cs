@@ -16,6 +16,8 @@ namespace Microsoft.Extensions.Caching.Memory
 
         private readonly DateTimeOffset? _absoluteExpiration;
 
+        internal readonly SemaphoreSlim _lock = new SemaphoreSlim(1, 1);
+
         internal CacheEntry(
             object key,
             object value,
@@ -107,6 +109,7 @@ namespace Microsoft.Extensions.Caching.Memory
             var expirationTokens = Options.ExpirationTokens;
             if (expirationTokens != null)
             {
+                _lock.Wait();
                 for (int i = 0; i < expirationTokens.Count; i++)
                 {
                     var expirationToken = expirationTokens[i];
@@ -120,19 +123,24 @@ namespace Microsoft.Extensions.Caching.Memory
                         ExpirationTokenRegistrations.Add(registration);
                     }
                 }
+                _lock.Release();
             }
         }
 
         private static void ExpirationTokensExpired(object obj)
         {
-            var entry = (CacheEntry)obj;
-            entry.SetExpired(EvictionReason.TokenExpired);
-            entry._notifyCacheOfExpiration(entry);
+            Task.Factory.StartNew(() =>
+            {
+                var entry = (CacheEntry)obj;
+                entry.SetExpired(EvictionReason.TokenExpired);
+                entry._notifyCacheOfExpiration(entry);
+            }, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
         }
 
         // TODO: Thread safety
         private void DetachTokens()
         {
+            _lock.Wait();
             var registrations = ExpirationTokenRegistrations;
             if (registrations != null)
             {
@@ -143,6 +151,7 @@ namespace Microsoft.Extensions.Caching.Memory
                     registration.Dispose();
                 }
             }
+            _lock.Release();
         }
 
         // TODO: Ensure a thread safe way to prevent these from being invoked more than once;
