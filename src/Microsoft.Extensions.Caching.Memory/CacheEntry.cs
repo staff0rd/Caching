@@ -16,7 +16,7 @@ namespace Microsoft.Extensions.Caching.Memory
 
         private readonly DateTimeOffset? _absoluteExpiration;
 
-        internal readonly SemaphoreSlim _lock = new SemaphoreSlim(1, 1);
+        internal readonly object _lock = new object();
 
         internal CacheEntry(
             object key,
@@ -109,49 +109,52 @@ namespace Microsoft.Extensions.Caching.Memory
             var expirationTokens = Options.ExpirationTokens;
             if (expirationTokens != null)
             {
-                _lock.Wait();
-                for (int i = 0; i < expirationTokens.Count; i++)
+                lock(_lock)
                 {
-                    var expirationToken = expirationTokens[i];
-                    if (expirationToken.ActiveChangeCallbacks)
+                    for (int i = 0; i < expirationTokens.Count; i++)
                     {
-                        if (ExpirationTokenRegistrations == null)
+                        var expirationToken = expirationTokens[i];
+                        if (expirationToken.ActiveChangeCallbacks)
                         {
-                            ExpirationTokenRegistrations = new List<IDisposable>(1);
+                            if (ExpirationTokenRegistrations == null)
+                            {
+                                ExpirationTokenRegistrations = new List<IDisposable>(1);
+                            }
+                            var registration = expirationToken.RegisterChangeCallback(ExpirationCallback, this);
+                            ExpirationTokenRegistrations.Add(registration);
                         }
-                        var registration = expirationToken.RegisterChangeCallback(ExpirationCallback, this);
-                        ExpirationTokenRegistrations.Add(registration);
                     }
                 }
-                _lock.Release();
             }
         }
 
         private static void ExpirationTokensExpired(object obj)
         {
-            Task.Factory.StartNew(() =>
+            // start a new thread to avoid issues with callbacks called from RegisterChangeCallback
+            Task.Factory.StartNew(state =>
             {
-                var entry = (CacheEntry)obj;
+                var entry = (CacheEntry)state;
                 entry.SetExpired(EvictionReason.TokenExpired);
                 entry._notifyCacheOfExpiration(entry);
-            }, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
+            }, obj, CancellationToken.None, TaskCreationOptions.DenyChildAttach, TaskScheduler.Default);
         }
 
         // TODO: Thread safety
         private void DetachTokens()
         {
-            _lock.Wait();
-            var registrations = ExpirationTokenRegistrations;
-            if (registrations != null)
+            lock(_lock)
             {
-                ExpirationTokenRegistrations = null;
-                for (int i = 0; i < registrations.Count; i++)
+                var registrations = ExpirationTokenRegistrations;
+                if (registrations != null)
                 {
-                    var registration = registrations[i];
-                    registration.Dispose();
+                    ExpirationTokenRegistrations = null;
+                    for (int i = 0; i < registrations.Count; i++)
+                    {
+                        var registration = registrations[i];
+                        registration.Dispose();
+                    }
                 }
             }
-            _lock.Release();
         }
 
         // TODO: Ensure a thread safe way to prevent these from being invoked more than once;
